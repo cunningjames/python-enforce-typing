@@ -1,37 +1,68 @@
 import typing
 import inspect
+
+from wrapt import decorator
 from contextlib import suppress
 from functools import wraps
+from typing import Any, Callable, TypeVar, Type, overload, Union, Literal
 
 
-def enforce_types(wrapped):
-    spec = inspect.getfullargspec(wrapped)
+F = TypeVar("F", bound=Callable[..., Any])
 
-    def check_types(*args, **kwargs):
-        params = dict(zip(spec.args, args))
-        params.update(kwargs)
-        for name, value in params.items():
-            with suppress(KeyError):
-                type_hint = spec.annotations[name]
-                if isinstance(type_hint, typing._SpecialForm):
-                    continue
-                actual_type = getattr(type_hint, "__origin__", type_hint)
-                actual_type = type_hint.__args__ if isinstance(actual_type, typing._SpecialForm) else actual_type
+
+def _check_types(spec: inspect.FullArgSpec, *args: Any, **kwargs: Any) -> None:
+    params = dict(zip(spec.args, args))
+    params.update(kwargs)
+
+    for name, value in params.items():
+        with suppress(KeyError):
+            type_hint = spec.annotations[name]
+            if isinstance(type_hint, typing._SpecialForm):
+                continue
+            actual_type = getattr(type_hint, "__origin__", type_hint)
+            literal = actual_type is Literal
+            actual_type = (
+                type_hint.__args__
+                if isinstance(actual_type, typing._SpecialForm)
+                else actual_type
+            )
+
+            if literal:
+                if value not in actual_type:
+                    raise TypeError(
+                        f"Expected type '{type_hint}' for attribute '{name}' but received value '{value}'"
+                    )
+            else:
                 if not isinstance(value, actual_type):
                     raise TypeError(
-                        f"Expected type '{type_hint}' for attribute '{name}' but received type '{type(value)}')"
+                        f"Expected type '{type_hint}' for attribute '{name}' but received type '{type(value)}'"
                     )
 
-    def decorate(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            check_types(*args, **kwargs)
-            return func(*args, **kwargs)
+@overload
+def enforce_types(wrapped: F) -> F:
+    ...
 
-        return wrapper
+
+@overload
+def enforce_types(wrapped: Type) -> Type:
+    ...
+
+
+def enforce_types(wrapped: Union[F, Type]) -> Union[F, Type]:
+    spec = inspect.getfullargspec(wrapped)
+
+    @decorator
+    def wrap(_wrapped, instance, args, kwargs):
+        if inspect.isclass(wrapped):
+            _check_types(spec, instance, *args, **kwargs)
+        else:
+            _check_types(spec, *args, **kwargs)
+
+        return _wrapped(*args, **kwargs)
 
     if inspect.isclass(wrapped):
-        wrapped.__init__ = decorate(wrapped.__init__)
+        wrapped.__init__ = wrap(wrapped.__init__)  # type: ignore
+
         return wrapped
 
-    return decorate(wrapped)
+    return wrap(wrapped)
